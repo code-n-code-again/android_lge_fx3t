@@ -1,9 +1,6 @@
 name: Build CyanogenMod 11
 
-on:
-  push:
-    branches:
-       - '**'
+on: [push]
 
 jobs:
   build:
