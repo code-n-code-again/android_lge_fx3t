@@ -1,12 +1,9 @@
 name: Build CyanogenMod 11
 
 on:
-  workflow_dispatch:
-    inputs:
-      device_codename:
-        description: 'Codinome do aparelho (ex: fx3, titan, mako)'
-        required: true
-        default: 'fx3'
+  push:
+    branches:
+       - '**'
 
 jobs:
   build:
