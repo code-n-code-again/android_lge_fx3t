@@ -1,13 +1,7 @@
 name: Build CyanogenMod 11 - LG Optimus F3 (fx3t)
 
 # Build pesada e demorada: só dispara manualmente.
-on:
-  workflow_dispatch:
-    inputs:
-      jobs:
-        description: "Threads para repo sync / make (ajuste conforme o runner)"
-        default: "2"
-        required: false
+on: [push]
 
 env:
   # Tudo fica dentro deste diretório, montado como volume no container Trusty.
