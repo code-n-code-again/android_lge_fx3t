@@ -1,4 +1,4 @@
-name: Build CyanogenMod 11
+name: Build CM11
 
 on: [push]
 
@@ -7,75 +7,51 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Limpeza pesada no Runner (libera ~30GB+ de espaço em disco)
       - name: Free Disk Space
         run: |
-          echo "=== Espaço antes da limpeza ==="
-          df -h
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/share/swift
           sudo docker image prune -a -f
-          echo "=== Espaço após limpeza ==="
-          df -h
 
-      # 2. Roda a compilação dentro do ambiente Ubuntu 14.04 (Trusty)
-      - name: Build ROM in Legacy Docker Container
+      - name: Build ROM
         uses: addunc/docker-runner-action@v1.1
         with:
           image: ubuntu:14.04
           options: -v ${{ github.workspace }}:/workspace -w /workspace
           script: |
             export DEBIAN_FRONTEND=noninteractive
-            
-            # Atualiza repositórios antigos para o archive do Ubuntu
             sed -i -e 's/archive.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list
             sed -i -e 's/security.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list
             
-            # Instala dependências exatas para compilação do CM11 / KitKat
             apt-get update && apt-get install -y \
               git-core gnupg flex bison gperf build-essential \
               zip curl zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 \
               lib32ncurses5-dev x11proto-core-dev libx11-dev lib32z1-dev ccache \
               libgl1-mesa-dev libxml2-utils xsltproc unzip python openjdk-7-jdk \
               schedtool
-            
-            # Ajusta Python e Java padrão
-            update-alternatives --set java /usr/lib/jvm/java-7-openjdk-amd64/jre/bin/java || true
-            
-            # Configura ferramenta Repo do Google
+
             mkdir -p ~/bin
             curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
             chmod a+x ~/bin/repo
             export PATH=~/bin:$PATH
 
-            # Configura Git temporário
             git config --global user.name "GitHub Actions"
             git config --global user.email "actions@github.com"
 
-            # Prepara diretório de trabalho
             mkdir -p android/cm11
             cd android/cm11
 
-            # Inicializa a árvore da CyanogenMod 11
             repo init -u https://github.com/CyanogenMod/android.git -b cm-11.0 --depth=1
-
-            # Sincroniza apenas o necessário para economizar banda e tempo
             repo sync -c -j4 --force-sync --no-clone-bundle --no-tags
 
-            # Executa a compilação do dispositivo informado
             source build/envsetup.sh
-            breakfast ${{ github.event.inputs.device_codename }}
+            breakfast fx3
             make -j$(nproc) bacon
 
-      # 3. Faz o upload da ROM (.zip) final nos Artefatos da Action
-      - name: Upload ROM Artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CM11-${{ github.event.inputs.device_codename }}-ROM
-          path: |
-            android/cm11/out/target/product/*/*.zip
-            !android/cm11/out/target/product/*/*ota*.zip
-          retention-days: 7
+          name: CM11-fx3-ROM
+          path: android/cm11/out/target/product/*/*.zip
