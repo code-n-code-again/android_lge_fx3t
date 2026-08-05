@@ -1,0 +1,154 @@
+name: Build CyanogenMod 11 - LG Optimus F3 (fx3t)
+
+# Build pesada e demorada: só dispara manualmente.
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "Threads para repo sync / make (ajuste conforme o runner)"
+        default: "2"
+        required: false
+
+env:
+  # Tudo fica dentro deste diretório, montado como volume no container Trusty.
+  BUILD_DIR: ${{ github.workspace }}/cm11
+  CONTAINER_NAME: cm11build
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360   # 6h é o teto do GitHub-hosted runner, não dá pra aumentar
+
+    steps:
+      - name: Liberar espaço em disco
+        run: |
+          echo "Espaço antes:"
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune -af || true
+          sudo apt-get clean
+          echo "Espaço depois:"
+          df -h /
+
+      - name: Criar swap (build pesada de C++/linker precisa de RAM extra)
+        continue-on-error: true   # best-effort: se falhar, a build segue sem esse extra de RAM
+        run: |
+          # Runners do GitHub às vezes já sobem com um /swapfile ativo;
+          # nesse caso o fallocate falha com "Text file busy". Desativa e recria.
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 8G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Preparar diretório de build
+        run: mkdir -p "$BUILD_DIR"
+
+      - name: Subir container Ubuntu 14.04 (Trusty) com o volume de build
+        run: |
+          docker run -d --name "$CONTAINER_NAME" \
+            -v "$BUILD_DIR:/root/cm11" \
+            -w /root/cm11 \
+            ubuntu:14.04 tail -f /dev/null
+
+      - name: Corrigir apt sources e instalar dependências
+        run: |
+          docker exec "$CONTAINER_NAME" bash -c '
+            set -e
+            # archive.ubuntu.com e security.ubuntu.com ainda servem o Trusty normalmente,
+            # então não redirecionamos para old-releases.ubuntu.com (esse mirror está com
+            # a árvore de dists/trusty incompleta e devolve 404 nos Packages).
+            # O que precisa mesmo é ignorar o "Valid-Until" expirado do Release antigo.
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -o Acquire::Check-Valid-Until=false --allow-unauthenticated
+
+            apt-get install -y --allow-unauthenticated \
+              bc bison build-essential curl flex g++-multilib gcc-multilib \
+              git gnupg gperf lib32ncurses5-dev lib32readline-gplv2-dev \
+              lib32z1-dev libesd0-dev liblz4-tool libncurses5-dev \
+              libsdl1.2-dev libwxgtk2.8-dev libxml2 libxml2-utils lzop \
+              openjdk-7-jdk pngcrush schedtool squashfs-tools xsltproc zip \
+              zlib1g-dev python2.7 ccache unzip rsync
+
+            update-alternatives --set java /usr/lib/jvm/java-7-openjdk-*/jre/bin/java || true
+            update-alternatives --set javac /usr/lib/jvm/java-7-openjdk-*/bin/javac || true
+
+            curl -s https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+            chmod a+x /usr/local/bin/repo
+
+            git config --global user.email "ci@example.com"
+            git config --global user.name "GitHub Actions"
+            git config --global color.ui false
+          '
+
+      - name: repo init (branch cm-11.0)
+        run: |
+          docker exec "$CONTAINER_NAME" bash -c '
+            set -e
+            repo init -u https://github.com/CyanogenMod/android.git \
+              -b cm-11.0 --depth=1
+          '
+
+      - name: Adicionar local manifest do fx3t (device tree + kernel)
+        # Escrito diretamente do host no volume montado (/root/cm11 no container
+        # == $BUILD_DIR no host). Usa printf em vez de heredoc: dentro de um bloco YAML
+        # "|" o terminador de um heredoc fica indentado e o bash nunca o reconhece,
+        # travando o passo esperando por stdin.
+        # Precisa de sudo: o "repo init" rodou como root dentro do container, então
+        # .repo/ ficou com dono root também no host (mesmo uid 0, sem remapeamento).
+        run: |
+          sudo mkdir -p "$BUILD_DIR/.repo/local_manifests"
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<manifest>' \
+            '    <remote name="fx3t" fetch="https://github.com/" />' \
+            '    <project path="device/lge/fx3t" name="daemon32/android_lge_fx3t.git" remote="fx3t" revision="master" />' \
+            '    <project path="kernel/lge/fx3t" name="daemon32/android_kernel_lge_fx3t.git" remote="fx3t" revision="master" />' \
+            '</manifest>' \
+            | sudo tee "$BUILD_DIR/.repo/local_manifests/fx3t.xml" > /dev/null
+          sudo cat "$BUILD_DIR/.repo/local_manifests/fx3t.xml"
+
+      - name: repo sync
+        run: |
+          docker exec "$CONTAINER_NAME" bash -c '
+            set -e
+            repo sync -c --no-clone-bundle --no-tags --force-sync \
+              -j${{ github.event.inputs.jobs }}
+          '
+
+      - name: brunch fx3t
+        run: |
+          docker exec "$CONTAINER_NAME" bash -c '
+            set -e
+            export USE_CCACHE=1
+            export CCACHE_DIR=/root/cm11/.ccache
+            source build/envsetup.sh
+            prebuilts/misc/linux-x86/ccache/ccache -M 20G || true
+            brunch fx3t
+          '
+
+      - name: Localizar artefatos gerados
+        id: find_output
+        run: |
+          # out/ também foi gerado como root dentro do container; sem isso o
+          # actions/upload-artifact (que roda sem sudo) não consegue ler o arquivo.
+          sudo chown -R "$(id -u):$(id -g)" "$BUILD_DIR/out" || true
+          OUT=$(find "$BUILD_DIR/out/target/product/fx3t" -maxdepth 1 -iname "cm-11*.zip" | head -n1)
+          echo "zip_path=$OUT" >> "$GITHUB_OUTPUT"
+          echo "Encontrado: $OUT"
+
+      - name: Upload do ZIP da ROM
+        if: steps.find_output.outputs.zip_path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: cm11-fx3t
+          path: ${{ steps.find_output.outputs.zip_path }}
+          retention-days: 7
+
+      - name: Parar container
+        if: always()
+        run: docker rm -f "$CONTAINER_NAME" || true
